@@ -8,8 +8,11 @@ import argparse
 import datetime
 from threading import Thread
 import time
+import os
+import csv
 
 # Video / image utilities
+# Install with conda install opencv and pip install imutils
 import cv2
 from imutils.video import WebcamVideoStream
 from imutils.video import FPS
@@ -20,10 +23,32 @@ import imutils
 import nidaqmx
 from nidaqmx.constants import LineGrouping
 
-# NiDAQMX Settings
-DEVICE_NAME = 'Dev_3DT'									# Name of NI Lab device
-ON = DEVICE_NAME + '/port1/line0'						# Port for ON pulse (1.0)
-OFF = DEVICE_NAME + '/port1/line1'						# Port for OFF pulse (1.1)
+# Serial imports
+# Install with pip install pyserial
+import serial
+
+# TTL pulse timestamps
+TIMESTAMPS = []
+
+# Setup pulse train recordings
+# Here we get the filepath of the code (default is in the Raspberry Pi's desktop)
+# and save the data recordings to where the Python code is, within a folder named
+# train_recordings.
+cwd = os.path.realpath(__file__)
+cwd = cwd.replace("pycam.py", "train_recordings/")
+
+# Here we get the starting timestamp. This is used to name the data file.
+# We get rid of colons since filenames can't have colons in them.
+starting_timestamp = str(datetime.datetime.now())
+starting_timestamp = starting_timestamp.replace(":", "_")
+starting_timestamp = starting_timestamp.replace(".", "_")
+
+# Print out the name of the to-be-saved data file path.
+cwd = cwd + starting_timestamp + ".csv"
+
+# SETTINGS
+WIDTH = 1920 # 4096 default
+HEIGHT = 1080 # 2160 default
 
 ## FPS COUNTER CLASS
 ## This is a separate class from the camera. It times the frames per second and returns an
@@ -69,10 +94,10 @@ class WebcamVideoStream:
 	def __init__(self, src=0):
 		# Initialize the video camera stream
 		self.stream = cv2.VideoCapture(src)
-		self.stream.set(3, 4096)						# Index 3 = width (default 4096)
-		self.stream.set(4, 2160)						# Index 4 = height (default 2160)
+		self.stream.set(3, WIDTH)						# Index 3 = width (default 4096)
+		self.stream.set(4, HEIGHT)						# Index 4 = height (default 2160)
 		self.stream.set(5, 30.0)						# Index 5 = camera's internal max fps
-		self.resolution = (4096, 2160)					# Tuple that holds default resolution pairing
+		self.resolution = (WIDTH, HEIGHT)					# Tuple that holds default resolution pairing
 
 		# Output settings
 		self.fps = -1									# FPS for output video
@@ -183,8 +208,8 @@ def main():
 	# XVID is fairly slower, but files are relatively small and compressed.
 	# Potential alternatives can also include MJPG, which is the fastest, but highly compressed
 	# and will affect video quality more so than the other codecs.
-	ap.add_argument("-c", "--codec", type=str, default='IYUV',
-	help="Codec to use; use IYUV for better FPS, XVID for more compression, MJPG for fastest FPS but hurts quality (default: \"IYUV\")")
+	ap.add_argument("-c", "--codec", type=str, default='MJPG',
+	help="Codec to use; use IYUV for better FPS, XVID for more compression, MJPG for fastest FPS but hurts quality (default: \"MJPG\")")
 
 	# Path to save the recorded video files. 
 	# Default: outputX.avi, where X is the respective camera the video was recording from. 
@@ -222,6 +247,7 @@ def main():
 	# Print out the parameter information before starting the stream.
 	print('[INST] Starting 4K camera program.')
 	print('[INST] Make sure start.py on the rPi is already initiated and ready to start!\n')
+	print('[STAT] Resolution: ' + str(WIDTH) + 'x' + str(HEIGHT))
 	print('[STAT] camera 1 index: ' + str(args["cam1"]))
 	print('[STAT] camera 2 index: ' + str(args["cam2"]))
 	print('[STAT] camera 3 index: ' + str(args["cam3"]))
@@ -233,9 +259,7 @@ def main():
 	print('[STAT] output path 2: ' + str(args["out2"]))
 	print('[STAT] output path 3: ' + str(args["out3"]))
 	print('[STAT] output path 4: ' + str(args["out4"]))
-	print('[STAT] NI Lab device: ' + DEVICE_NAME)
-	print('[STAT] NI on port: ' + ON)
-	print('[STAT] NI off port: ' + OFF)
+	print('[STAT] TTL Train data save path: ' + cwd)
 
 	# ##################### #
 	#	INITIALIZE CAMERAS	#
@@ -283,24 +307,28 @@ def main():
 	#	READ ON PULSES	#
 	# ################# #
 
-	# INITIALIZE NIDAQ TASK for TTL
+	# INITIALIZE TASK for TTL
 	# At this point we keep reading for pulses from the ON port until we get a signal to actually start.
 	if args["seconds"] == -1:	# If seconds is set to -1, it will be considered in TTL mode and will wait for a pulse before starting.
-		# Setup a task to read from ON-port (1.0)
-		task = nidaqmx.Task()
-		task.di_channels.add_di_chan(ON, line_grouping=LineGrouping.CHAN_PER_LINE)  # Read from ON port (1.0)
+		# Set up serial port to read start pulse
+		COM_PORT = 'COM4' # USB Serial COM Port
+		ser = serial.Serial(port=COM_PORT, baudrate = 115200, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE, bytesize=serial.EIGHTBITS, timeout=1)
+		
 		# Wait for pulse before starting
 		print('[INFO] Waiting for TTL pulse...')
 		PULSE_START = False
 
 		# Keep reading from the port until a valid pulse is detected.
 		while PULSE_START is False:
+		
 			# Read input data
-			data = task.read(number_of_samples_per_channel=1)		
+			pulse = ser.read(1)
+			
 			# Check if ON pulse occurred, if so, start recording.
-			if data[0] is True:
+			if pulse is b'\x00':
 				PULSE_START = True
-				task.close()
+				TIMESTAMPS.append([str(datetime.datetime.now()), pulse])
+				print('\n[INFO] START PULSE DETECTED')
 
 	# ######################### #
 	#	START VIDEO STREAMS		#
@@ -323,7 +351,7 @@ def main():
 	if args["seconds"] != -1:
 
 		# Keep recording until the time duration is reached.
-		print('[DEBG] Initialize time-based recording...')
+		print('[INFO] Initialized time-based recording...')
 		start = datetime.datetime.now()
 		end = datetime.datetime.now()
 		while (end - start).total_seconds() < args["seconds"]:
@@ -335,24 +363,24 @@ def main():
 	# Here we keep recording from the off port, waiting for a signal to stop.
 	# The cameras will keep recording until a valid off pulse is read.
 	if args["seconds"] == -1:
-		print('[DEBG] Initialize TTL-based recording...')
+		print('[INFO] Initialized TTL-based recording...')
 		# Keep reading in TTL pulse to know when to stop
 		PULSE_STOP = False
-
-		# Setup task to read from OFF-port (1.1)
-		task = nidaqmx.Task()
-		task.di_channels.add_di_chan(OFF, line_grouping=LineGrouping.CHAN_PER_LINE)
 
 		# Keep recording until stop pulse is sent
 		while PULSE_STOP is False:	
 
-			# Read from OFF port (1.1)
-			data = task.read(number_of_samples_per_channel=1)
+			# Read from serial
+			pulse = ser.read(1)
+			
+			# Add to timestamp
+			if pulse is b'\x00':
+				TIMESTAMPS.append([str(datetime.datetime.now()), pulse])
 
 			# Check if OFF pulse occurred, and if so, stop recording.
-			if data[0] is True:
+			if pulse is b'':
 				PULSE_STOP = True
-				task.close()
+				print('\n[INFO] STOP PULSE DETECTED\n')
 
 	# ################# #
 	#	STOP RECORDING	#
@@ -412,6 +440,16 @@ def main():
 	if round(average_fps4) < vs4.fps:
 		print('[WARNING]: Average output FPS for camera 4 does not closely match specified FPS!')
 
+	print('\n[INFO] Saving TTL pulse data to ' + str(cwd))
+		
+	# Save data to csv file in train_recordings folder
+	with open(cwd, 'w') as csvfile:
+		writer = csv.writer(csvfile, delimiter=',')
+		writer.writerow(['Timestamp', 'Value'])
+		for i in range(len(TIMESTAMPS)):
+			writer.writerow([TIMESTAMPS[i][0], TIMESTAMPS[i][1]])
+	csvfile.close()
+	
 	print('\nPROGRAM CONCLUDED!')
 	return
 
